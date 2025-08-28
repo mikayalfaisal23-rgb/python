@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interactive Stock Portfolio</title>
+  <!-- Simple, self-contained styling -->
+  <style>
+    :root{--bg:#0f1724;--card:#0b1220;--muted:#94a3b8;--accent:#60a5fa;--good:#2dd4bf;--bad:#fb7185}
+    *{box-sizing:border-box;font-family:Inter,ui-sans-serif,system-ui,Arial,Helvetica,sans-serif}
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#071024 0%, #071026 100%);color:#e6eef8}
+    .container{max-width:1100px;margin:32px auto;padding:20px}
+    header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+    header h1{font-size:1.25rem;margin:0}
+    .card{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(2,6,23,0.6)}
+    form{display:flex;gap:8px;flex-wrap:wrap}
+    label{display:flex;flex-direction:column;font-size:12px;color:var(--muted)}
+    input,select{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px;border-radius:8px;color:inherit}
+    button{background:var(--accent);color:#05203b;border:none;padding:9px 12px;border-radius:8px;cursor:pointer}
+    button.delete{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted)}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:10px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.03);font-size:13px}
+    th{color:var(--muted);font-size:12px}
+    .right{text-align:right}
+    .small{font-size:12px;color:var(--muted)}
+    .positive{color:var(--good)}
+    .negative{color:var(--bad)}
+    .controls{display:flex;gap:8px;align-items:center}
+    .totals{display:flex;gap:12px;margin-top:12px;flex-wrap:wrap}
+    .totals .tile{background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent);padding:12px;border-radius:10px;min-width:160px}
+    footer{margin-top:18px;color:var(--muted);font-size:12px}
+    @media (max-width:800px){form{flex-direction:column} .controls{flex-direction:row} th:nth-child(5),td:nth-child(5){display:none}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Interactive Stock Portfolio</h1>
+      <div class="small">Saves locally in your browser (localStorage).</div>
+    </header>
+
+    <section class="card">
+      <form id="addForm">
+        <label>Ticker
+          <input id="ticker" required placeholder="AAPL" maxlength="10">
+        </label>
+        <label>Shares
+          <input id="shares" type="number" step="0.0001" min="0" required value="1">
+        </label>
+        <label>Buy Price
+          <input id="buyPrice" type="number" step="0.0001" min="0" required value="100">
+        </label>
+        <label>Currency
+          <select id="currency"><option value="USD">USD</option></select>
+        </label>
+        <div class="controls">
+          <button type="submit">Add / Update</button>
+          <button type="button" id="clearBtn" class="delete">Clear Portfolio</button>
+          <button type="button" id="exportBtn" class="delete">Export CSV</button>
+        </div>
+      </form>
+
+      <div class="totals" id="summary"></div>
+
+      <table id="portfolioTable" class="card" aria-live="polite">
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th>Shares</th>
+            <th>Buy Price</th>
+            <th>Current Price</th>
+            <th class="right">Value</th>
+            <th class="right">Unrealized</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <footer>
+        To get live prices, add a free API key from Finnhub (https://finnhub.io). Enter it below and click "Fetch Prices". This demo will still work without an API key using simulated demo prices.
+      </footer>
+
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+        <input id="apiKey" placeholder="FINNHUB_API_KEY (optional)" style="flex:1;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit">
+        <button id="fetchPricesBtn">Fetch Prices</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // -------------------------
+    // Local portfolio model + helpers
+    // -------------------------
+    const LS_KEY = 'interactive_stock_portfolio_v1';
+
+    function loadPortfolio(){
+      try{
+        const raw = localStorage.getItem(LS_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch(e){
+        console.error('load error',e); return [];
+      }
+    }
+    function savePortfolio(arr){
+      localStorage.setItem(LS_KEY, JSON.stringify(arr));
+    }
+
+    function formatNumber(n){
+      return Number(n).toLocaleString(undefined,{maximumFractionDigits:2});
+    }
+
+    // -------------------------
+    // Demo price source: if user provides FINNHUB API key, we'll fetch real quotes.
+    // Finnhub quote endpoint: https://finnhub.io/docs/api/quote
+    // Example: https://finnhub.io/api/v1/quote?symbol=AAPL&token=YOUR_KEY
+    // Note: You can replace the fetch impl with any provider; keep CORS and API key rules in mind.
+    // -------------------------
+    async function fetchPriceForTicker(ticker, apiKey){
+      if(!apiKey) return simulatePrice(ticker);
+      try{
+        const q = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(apiKey)}`;
+        const res = await fetch(q);
+        if(!res.ok) throw new Error('price fetch failed');
+        const data = await res.json();
+        // Finnhub returns: c (current), h, l, o, pc (prev close)
+        if(typeof data.c === 'number' && data.c > 0) return data.c;
+        return simulatePrice(ticker);
+      } catch(e){
+        console.warn('fetch price failed for',ticker,e);
+        return simulatePrice(ticker);
+      }
+    }
+
+    function simulatePrice(ticker){
+      // deterministic-ish pseudo-random based on ticker characters
+      let seed = 0;
+      for(let i=0;i<ticker.length;i++) seed = (seed*31 + ticker.charCodeAt(i)) % 100000;
+      const base = 20 + (seed % 500) / 10; // 20..70
+      const noise = (Math.sin(seed) + Math.cos(seed*3)) * (seed%7)/10;
+      return Math.max(0.01, +(base + noise).toFixed(2));
+    }
+
+    // -------------------------
+    // UI + wiring
+    // -------------------------
+    const form = document.getElementById('addForm');
+    const tickerInput = document.getElementById('ticker');
+    const sharesInput = document.getElementById('shares');
+    const buyPriceInput = document.getElementById('buyPrice');
+    const tableBody = document.querySelector('#portfolioTable tbody');
+    const summaryEl = document.getElementById('summary');
+    const clearBtn = document.getElementById('clearBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const fetchPricesBtn = document.getElementById('fetchPricesBtn');
+    const apiKeyInput = document.getElementById('apiKey');
+
+    let portfolio = loadPortfolio();
+    render();
+
+    form.addEventListener('submit', (e)=>{
+      e.preventDefault();
+      const ticker = tickerInput.value.trim().toUpperCase();
+      const shares = parseFloat(sharesInput.value) || 0;
+      const buyPrice = parseFloat(buyPriceInput.value) || 0;
+      if(!ticker || shares<=0) return alert('Enter valid ticker and shares');
+      const idx = portfolio.findIndex(p=>p.ticker===ticker);
+      if(idx>=0){
+        // update existing
+        portfolio[idx].shares = shares;
+        portfolio[idx].buyPrice = buyPrice;
+      } else {
+        portfolio.push({ticker,shares,buyPrice});
+      }
+      savePortfolio(portfolio);
+      render();
+      form.reset();
+      sharesInput.value = 1; buyPriceInput.value = 100;
+    });
+
+    clearBtn.addEventListener('click', ()=>{
+      if(!confirm('Clear entire portfolio?')) return;
+      portfolio = [];
+      savePortfolio(portfolio);
+      render();
+    });
+
+    exportBtn.addEventListener('click', ()=>{
+      if(!portfolio.length) return alert('No holdings to export');
+      const rows = [['Ticker','Shares','Buy Price']].concat(portfolio.map(p=>[p.ticker,p.shares,p.buyPrice]));
+      const csv = rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+      const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'portfolio.csv'; a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    async function render(){
+      tableBody.innerHTML = '';
+      let totalValue = 0, totalCost = 0;
+      for(const entry of portfolio){
+        const tr = document.createElement('tr');
+        const curPriceCell = document.createElement('td');
+        curPriceCell.textContent = '—';
+        curPriceCell.classList.add('small');
+
+        // placeholders while we fetch
+        const pricePromise = fetchPriceForTicker(entry.ticker, apiKeyInput.value.trim());
+
+        tr.innerHTML = `
+          <td><strong>${entry.ticker}</strong><div class="small">${entry.ticker}</div></td>
+          <td>${entry.shares}</td>
+          <td>${formatNumber(entry.buyPrice)}</td>
+        `;
+        tr.appendChild(curPriceCell);
+
+        const valueCell = document.createElement('td'); valueCell.classList.add('right'); valueCell.textContent = '—';
+        const unrealizedCell = document.createElement('td'); unrealizedCell.classList.add('right'); unrealizedCell.textContent = '—';
+        const actionsCell = document.createElement('td');
+        const delBtn = document.createElement('button'); delBtn.className='delete'; delBtn.textContent='Delete';
+        delBtn.addEventListener('click', ()=>{ portfolio = portfolio.filter(p=>p.ticker!==entry.ticker); savePortfolio(portfolio); render(); });
+        actionsCell.appendChild(delBtn);
+        tr.appendChild(valueCell);
+        tr.appendChild(unrealizedCell);
+        tr.appendChild(actionsCell);
+        tableBody.appendChild(tr);
+
+        // resolve price
+        pricePromise.then(price=>{
+          const val = price * entry.shares;
+          const cost = entry.buyPrice * entry.shares;
+          totalValue += val;
+          totalCost += cost;
+
+          curPriceCell.textContent = formatNumber(price);
+          valueCell.textContent = formatNumber(val);
+          const diff = val - cost;
+          unrealizedCell.textContent = (diff>=0?'+':'') + formatNumber(diff);
+          if(diff>=0){ unrealizedCell.classList.add('positive'); unrealizedCell.classList.remove('negative'); }
+          else{ unrealizedCell.classList.add('negative'); unrealizedCell.classList.remove('positive'); }
+
+          // update summary after last item resolves
+          // note: for a small number of holdings this is fine; for many holdings you might batch requests
+          updateSummary();
+        }).catch(e=>{
+          curPriceCell.textContent = '—'; console.warn('price err',e);
+        });
+      }
+      // optimistic summary: sum of (shares*buyPrice) as cost, value will update as prices resolve
+      const currentCost = portfolio.reduce((s,p)=>s + p.buyPrice*p.shares, 0);
+      renderSummaryPlaceholder(currentCost);
+    }
+
+    function renderSummaryPlaceholder(cost){
+      summaryEl.innerHTML = '';
+      const costTile = document.createElement('div'); costTile.className='tile'; costTile.innerHTML = `<div class="small">Total Cost</div><div><strong>${formatNumber(cost)}</strong></div>`;
+      summaryEl.appendChild(costTile);
+
+      const valTile = document.createElement('div'); valTile.className='tile'; valTile.id='totalValueTile'; valTile.innerHTML = `<div class="small">Market Value</div><div><strong>—</strong></div>`;
+      summaryEl.appendChild(valTile);
+
+      const pnlTile = document.createElement('div'); pnlTile.className='tile'; pnlTile.id='pnlTile'; pnlTile.innerHTML = `<div class="small">Unrealized P/L</div><div><strong>—</strong></div>`;
+      summaryEl.appendChild(pnlTile);
+    }
+
+    async function updateSummary(){
+      // compute current market value by reading table values (since prices are async and written into DOM)
+      let totVal = 0; let totCost = 0;
+      for(const p of portfolio){
+        totCost += p.buyPrice * p.shares;
+      }
+      // read value cells
+      const rows = Array.from(document.querySelectorAll('#portfolioTable tbody tr'));
+      for(const r of rows){
+        const valueCell = r.children[4];
+        const txt = valueCell.textContent.replace(/[+,]/g,'').trim();
+        const v = parseFloat(txt);
+        if(!isNaN(v)) totVal += v;
+      }
+      const pnl = totVal - totCost;
+      document.getElementById('totalValueTile').innerHTML = `<div class="small">Market Value</div><div><strong>${isNaN(totVal)?'—':formatNumber(totVal)}</strong></div>`;
+      const pnlTile = document.getElementById('pnlTile');
+      pnlTile.innerHTML = `<div class="small">Unrealized P/L</div><div><strong>${isNaN(pnl)?'—':(pnl>=0?'+':'')+formatNumber(pnl)}</strong></div>`;
+      if(!isNaN(pnl)){
+        pnlTile.querySelector('strong').className = pnl>=0? 'positive' : 'negative';
+      }
+    }
+
+    // fetch prices for all holdings when user clicks "Fetch Prices"
+    fetchPricesBtn.addEventListener('click', async ()=>{
+      if(!portfolio.length) return alert('No holdings to fetch');
+      fetchPricesBtn.disabled = true; fetchPricesBtn.textContent = 'Fetching...';
+      try{
+        for(const p of portfolio){
+          // call fetchPriceForTicker to warm the cache and update UI
+          const price = await fetchPriceForTicker(p.ticker, apiKeyInput.value.trim());
+          // find row and update quickly: render() will update again but keep things snappy
+          const row = Array.from(document.querySelectorAll('#portfolioTable tbody tr')).find(r=> r.children[0].textContent.includes(p.ticker));
+          if(row){
+            const valCell = row.children[4];
+            const unrealCell = row.children[5];
+            const val = price * p.shares;
+            const cost = p.buyPrice * p.shares;
+            valCell.textContent = formatNumber(val);
+            unrealCell.textContent = (val-cost>=0?'+':'') + formatNumber(val-cost);
+            if(val-cost>=0){ unrealCell.classList.add('positive'); unrealCell.classList.remove('negative'); }
+            else{ unrealCell.classList.add('negative'); unrealCell.classList.remove('positive'); }
+          }
+        }
+        updateSummary();
+      } finally{
+        fetchPricesBtn.disabled = false; fetchPricesBtn.textContent = 'Fetch Prices';
+      }
+    });
+
+    // initial render
+    // note: we intentionally don't attempt to fetch prices on load to avoid accidental network calls.
+
+    // make portfolio accessible via window for debugging in devtools
+    window._portfolio = {
+      get: ()=>portfolio,
+      add:(t,s,b)=>{ portfolio.push({ticker:t,shares:s,buyPrice:b}); savePortfolio(portfolio); render(); }
+    };
+
+  </script>
+</body>
+</html>
